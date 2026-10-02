@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>تست مونتاژ ویدیو</title>
+<style>
+  body{font-family:system-ui,Tahoma,sans-serif;margin:0;padding:16px;background:#111;color:#eee;line-height:1.7}
+  h1{font-size:20px;margin:0 0 12px}
+  label{display:block;margin:14px 0 4px;font-size:14px;color:#bbb}
+  input[type=file],select,textarea{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #444;background:#1c1c1c;color:#eee;font-size:15px}
+  textarea{min-height:80px}
+  button{width:100%;margin-top:18px;padding:14px;border:0;border-radius:10px;background:#4f8cff;color:#fff;font-size:17px}
+  button:disabled{background:#555}
+  canvas{width:100%;margin-top:14px;background:#000;border-radius:8px}
+  #log{white-space:pre-wrap;font-size:13px;color:#9fd;margin-top:10px}
+  video#out{width:100%;margin-top:12px;border-radius:8px}
+  a#dl{display:none;margin-top:10px;text-align:center;padding:12px;border-radius:10px;background:#2a9d5c;color:#fff;text-decoration:none}
+</style>
+</head>
+<body>
+<h1>تست مونتاژ ویدیو روی گوشی</h1>
+
+<label>کلیپ‌ها (یک یا چند ویدیوی کوتاه، به ترتیب انتخاب)</label>
+<input type="file" id="clips" accept="video/*" multiple>
+
+<label>زیرنویس هر کلیپ (هر خط برای یک کلیپ)</label>
+<textarea id="subs" placeholder="خط اول برای کلیپ اول&#10;خط دوم برای کلیپ دوم"></textarea>
+
+<label>موسیقی پس‌زمینه (اختیاری)</label>
+<input type="file" id="music" accept="audio/*">
+
+<label>کیفیت خروجی</label>
+<select id="res">
+  <option value="480" selected>۴۸۰p (سبک، پیشنهادی برای تست)</option>
+  <option value="720">۷۲۰p (سنگین‌تر)</option>
+</select>
+
+<button id="go">شروع رندر</button>
+<canvas id="cv" width="854" height="480"></canvas>
+<div id="log">آماده. رندر هم‌زمان با پخش انجام می‌شود، پس مدت آن تقریباً برابر طول ویدیوست. صفحه را باز و روشن نگه دارید.</div>
+<video id="out" controls playsinline style="display:none"></video>
+<a id="dl">دانلود ویدیو</a>
+
+<script>
+const $ = id => document.getElementById(id);
+const log = m => { $('log').textContent = m; };
+const FADE = 0.4;
+
+function pickMime(){
+  const c = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
+  return c.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+}
+function loadVideo(url){
+  return new Promise((res, rej) => {
+    const v = document.createElement('video');
+    v.playsInline = true; v.preload = 'auto'; v.src = url;
+    v.onloadedmetadata = () => res(v);
+    v.onerror = () => rej(new Error('این ویدیو باز نشد'));
+  });
+}
+function memInfo(){
+  return performance.memory ? Math.round(performance.memory.usedJSHeapSize/1048576) + ' مگابایت (حافظه جاوااسکریپت)' : 'در این مرورگر قابل نمایش نیست';
+}
+
+$('go').onclick = async () => {
+  const files = [...$('clips').files];
+  if(!files.length){ log('اول حداقل یک کلیپ انتخاب کنید.'); return; }
+  $('go').disabled = true; $('dl').style.display = 'none'; $('out').style.display = 'none';
+  const subs = $('subs').value.split('\n');
+  const H = +$('res').value;
+  const t0 = performance.now();
+  try{
+    const urls = files.map(f => URL.createObjectURL(f));
+    const vids = [];
+    for(const u of urls) vids.push(await loadVideo(u));
+    const ratio = vids[0].videoWidth / vids[0].videoHeight;
+    const cv = $('cv');
+    cv.height = H; cv.width = Math.round(H * ratio / 2) * 2;
+    const g = cv.getContext('2d');
+
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const dest = ac.createMediaStreamDestination();
+    vids.forEach(v => ac.createMediaElementSource(v).connect(dest));
+    let music = null;
+    if($('music').files[0]){
+      music = new Audio(URL.createObjectURL($('music').files[0]));
+      music.loop = true;
+      const gain = ac.createGain(); gain.gain.value = 0.25;
+      ac.createMediaElementSource(music).connect(gain).connect(dest);
+    }
+
+    const stream = cv.captureStream(30);
+    dest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+    const mime = pickMime();
+    const rec = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: H === 720 ? 4000000 : 2000000 });
+    const chunks = [];
+    rec.ondataavailable = e => { if(e.data.size) chunks.push(e.data); };
+    const done = new Promise(r => rec.onstop = r);
+    await ac.resume();
+    rec.start(1000);
+    if(music) music.play();
+
+    for(let i = 0; i < vids.length; i++){
+      const v = vids[i];
+      v.currentTime = 0;
+      await v.play();
+      await new Promise(resolve => {
+        const draw = () => {
+          const t = v.currentTime, d = v.duration || 1;
+          const a = Math.max(0, Math.min(1, t / FADE, (d - t) / FADE));
+          g.globalAlpha = 1; g.fillStyle = '#000'; g.fillRect(0, 0, cv.width, cv.height);
+          g.globalAlpha = a; g.drawImage(v, 0, 0, cv.width, cv.height);
+          const s = (subs[i] || '').trim();
+          if(s){
+            g.font = 'bold ' + Math.round(cv.height / 16) + 'px Tahoma, sans-serif';
+            g.textAlign = 'center'; g.lineWidth = 5; g.strokeStyle = '#000'; g.fillStyle = '#fff';
+            g.strokeText(s, cv.width / 2, cv.height * 0.92);
+            g.fillText(s, cv.width / 2, cv.height * 0.92);
+          }
+          const el = ((performance.now() - t0) / 1000).toFixed(0);
+          log('کلیپ ' + (i + 1) + ' از ' + vids.length + ' | زمان گذشته: ' + el + ' ثانیه\nحافظه: ' + memInfo());
+          if(v.ended || v.paused && t >= d - 0.05){ resolve(); return; }
+          requestAnimationFrame(draw);
+        };
+        v.onended = () => resolve();
+        draw();
+      });
+    }
+    if(music) music.pause();
+    rec.stop();
+    await done;
+    const blob = new Blob(chunks, { type: mime || 'video/webm' });
+    const url = URL.createObjectURL(blob);
+    $('out').src = url; $('out').style.display = 'block';
+    const dl = $('dl'); dl.href = url; dl.download = 'test.' + (mime.includes('mp4') ? 'mp4' : 'webm'); dl.style.display = 'block';
+    const total = ((performance.now() - t0) / 1000).toFixed(0);
+    log('تمام شد ✅\nمدت کل: ' + total + ' ثانیه | حجم فایل: ' + (blob.size / 1048576).toFixed(1) + ' مگابایت\nحافظه: ' + memInfo() + '\nاین اعداد را برای من بفرستید.');
+    ac.close();
+  }catch(e){
+    log('خطا: ' + e.message + '\nمتن این خطا را برای من بفرستید.');
+  }
+  $('go').disabled = false;
+};
+</script>
+</body>
+</html>
